@@ -1,26 +1,23 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useJsApiLoader } from '@react-google-maps/api';
-import {
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc,
-} from 'firebase/firestore';
-import { onAuthStateChanged, signOut } from 'firebase/auth';
 
-import { auth, db } from './firebase.js';
 import Sidebar from './components/Sidebar.jsx';
 import MapView from './components/MapView.jsx';
 import Login from './components/Login.jsx';
 import Toast from './components/Toast.jsx';
 import useGPS from './hooks/ useGPS.js';
-import { getAreaHa, settleWithin } from './utils.js';
+import { getAreaHa } from './utils.js';
+import { me, logout as apiLogout } from './api/auth.js';
+import {
+  listFields, createField, updateField, deleteField as apiDeleteField,
+} from './api/fields.js';
 import styles from './App.module.css';
 
 const LIBRARIES = ['geometry', 'places'];
 const NO_FIELDS = [];
 
 // ── Signed-in workspace ──────────────────────────────────────────────────
-function Workspace({ user }) {
-  const uid = user.uid;
-
+function Workspace({ user, onSignOut }) {
   const { isLoaded, loadError } = useJsApiLoader({
     id: 'google-map-script',
     googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY,
@@ -28,17 +25,15 @@ function Workspace({ user }) {
   });
 
   const [map, setMap] = useState(null);
-  const [data, setData] = useState({ uid: null, fields: NO_FIELDS, sync: 'connecting' });
+  const [fields, setFields] = useState(NO_FIELDS);
+  const [dbLoading, setDbLoading] = useState(true);
+  const [syncState, setSyncState] = useState('connecting');
   const [selectedField, setSelectedField] = useState(null);
   const [dbError, setDbError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const mapViewRef = useRef(null);
-
-  // Data belongs to the signed-in user; show nothing until their snapshot arrives
-  const dbLoading = data.uid !== uid;
-  const fields = dbLoading ? NO_FIELDS : data.fields;
 
   const notify = useCallback((message, type = 'info') => {
     setToast({ message, type, id: Date.now() });
@@ -56,34 +51,40 @@ function Workspace({ user }) {
     return () => mq.removeEventListener('change', handler);
   }, []);
 
-  // Real-time listener on THIS user's parcels only
+  const loadFields = useCallback(async () => {
+    setSyncState('connecting');
+    try {
+      const rows = await listFields();
+      setFields(rows);
+      setDbError(null);
+      setSyncState('synced');
+    } catch (error) {
+      console.error('Fields load error:', error);
+      setDbError('Could not load your parcels. Check your connection and that the API is running.');
+      setSyncState('error');
+      if (error.status === 401) onSignOut?.();
+    } finally {
+      setDbLoading(false);
+    }
+  }, [onSignOut]);
+
   useEffect(() => {
-    return onSnapshot(
-      collection(db, 'users', uid, 'fields'),
-      { includeMetadataChanges: true },
-      (snapshot) => {
-        const loaded = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-        loaded.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-        const sync = snapshot.metadata.hasPendingWrites
-          ? 'pending'
-          : snapshot.metadata.fromCache ? 'connecting' : 'synced';
-        setData({ uid, fields: loaded, sync });
-      },
-      (error) => {
-        console.error('Firestore read error:', error);
-        setDbError('Could not load your parcels. Check your connection and Firestore rules.');
-      }
-    );
-  }, [uid]);
+    loadFields();
+  }, [loadFields]);
 
   const hasUnsavedPlot = selectedField?.id === null;
 
   const handlePolygonComplete = ({ coordinates, area, areaHa }) => {
     setSelectedField({
       id: null,
-      draftKey: Date.now(), // remounts the editor for each new drawing
-      coordinates, area, areaHa,
-      crop: 'Unassigned', notes: '', farmerCode: '', ownerName: '',
+      draftKey: Date.now(),
+      coordinates,
+      area,
+      areaHa,
+      crop: 'Unassigned',
+      notes: '',
+      farmerCode: '',
+      ownerName: '',
     });
     setSidebarOpen(true);
   };
@@ -91,32 +92,32 @@ function Workspace({ user }) {
   const handleSaveField = async (values) => {
     if (!selectedField) return;
     setSaving(true);
+    setSyncState('pending');
     try {
-      const col = collection(db, 'users', uid, 'fields');
-      const now = new Date().toISOString();
-      const write = selectedField.id
-        ? updateDoc(doc(col, selectedField.id), { ...values, areaHa: getAreaHa(selectedField), updatedAt: now })
-        : addDoc(col, {
-            coordinates: selectedField.coordinates,
-            area: selectedField.area,
-            areaHa: getAreaHa(selectedField),
-            ...values,
-            createdAt: now,
-          });
-
-      write.catch((error) => console.error('Firestore write error (may arrive late):', error));
-      const outcome = await settleWithin(write);
+      const areaHa = getAreaHa(selectedField);
+      if (selectedField.id) {
+        const updated = await updateField(selectedField.id, {
+          ...values,
+          areaHa,
+          // keep existing boundary on metadata-only edits
+        });
+        setFields((prev) => prev.map((f) => (f.id === updated.id ? updated : f)));
+      } else {
+        const created = await createField({
+          coordinates: selectedField.coordinates,
+          areaHa,
+          ...values,
+        });
+        setFields((prev) => [created, ...prev]);
+      }
       setSelectedField(null);
-      if (outcome === 'saved') notify('Plot saved.', 'success');
-      else notify('Saved on this device. It will sync when your connection recovers.', 'warning');
+      setSyncState('synced');
+      notify('Plot saved.', 'success');
     } catch (error) {
-      console.error('Firestore save error:', error);
-      notify(
-        error.code === 'permission-denied'
-          ? 'Not allowed to save. Check your Firestore rules.'
-          : 'Could not save the plot. Please try again.',
-        'error'
-      );
+      console.error('Save error:', error);
+      setSyncState('error');
+      notify(error.message || 'Could not save the plot. Please try again.', 'error');
+      if (error.status === 401) onSignOut?.();
     } finally {
       setSaving(false);
     }
@@ -124,64 +125,103 @@ function Workspace({ user }) {
 
   const handleDeleteField = async (id) => {
     if (!window.confirm('Delete this parcel permanently? This cannot be undone.')) return;
+    setSyncState('pending');
     try {
-      const outcome = await settleWithin(deleteDoc(doc(db, 'users', uid, 'fields', id)));
+      await apiDeleteField(id);
+      setFields((prev) => prev.filter((f) => f.id !== id));
       if (selectedField?.id === id) setSelectedField(null);
-      if (outcome === 'saved') notify('Parcel deleted.', 'success');
-      else notify('Deleted on this device. It will sync when your connection recovers.', 'warning');
+      setSyncState('synced');
+      notify('Parcel deleted.', 'success');
     } catch (error) {
-      console.error('Firestore delete error:', error);
-      notify('Could not delete the parcel. Please try again.', 'error');
+      console.error('Delete error:', error);
+      setSyncState('error');
+      notify(error.message || 'Could not delete the parcel.', 'error');
+      if (error.status === 401) onSignOut?.();
     }
   };
 
   const handleFlyToField = (field) => {
-    setSelectedField(field);
-    mapViewRef.current?.panToField(field);
+    mapViewRef.current?.panToField?.(field);
     setSidebarOpen(false);
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await apiLogout();
+    } catch (e) {
+      console.warn('Logout request failed:', e);
+    }
+    onSignOut?.();
   };
 
   if (loadError) {
     return (
-      <div className={styles.errorMessage}>
-        Maps failed to load. Check that VITE_GOOGLE_MAPS_API_KEY is set and that billing and
-        the Maps JavaScript, Places and Geocoding APIs are enabled in Google Cloud Console.
+      <div className={styles.statusMessage}>
+        Google Maps failed to load. Check VITE_GOOGLE_MAPS_API_KEY.
       </div>
     );
   }
-  if (!isLoaded) return <div className={styles.statusMessage}>Initializing geospatial systems…</div>;
-  if (dbError) {
-    return (
-      <div className={styles.errorMessage}>
-        🔥 {dbError}{' '}
-        <button type="button" onClick={() => window.location.reload()}>Retry</button>
-      </div>
-    );
+
+  if (!isLoaded) {
+    return <div className={styles.statusMessage}>Loading map…</div>;
   }
 
   return (
-    <div className={styles.dashboardContainer} style={{ position: 'relative' }}>
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: '#FAF7F2' }}>
       <style>{`
-        .mobile-topbar{display:none}
-        @media (max-width:768px){
-          .mobile-topbar{display:flex;position:fixed;top:0;left:0;right:0;z-index:30;background:#FAF7F2;border-bottom:1px solid #E6E0D6;padding:10px 16px;align-items:center;justify-content:space-between;gap:10px}
-          .map-push-down{padding-top:52px}
+        .mobile-topbar { display: none; }
+        @media (max-width: 768px) {
+          .mobile-topbar {
+            display: flex; position: fixed; top: 0; left: 0; right: 0; z-index: 40;
+            height: 52px; align-items: center; justify-content: space-between;
+            padding: 0 12px; background: #FAF7F2; border-bottom: 1px solid #E6E0D6;
+          }
+          .map-push-down { padding-top: 52px; }
         }
       `}</style>
 
-      {toast && <Toast key={toast.id} message={toast.message} type={toast.type} onDone={dismissToast} />}
+      {toast && (
+        <Toast key={toast.id} message={toast.message} type={toast.type} onDone={dismissToast} />
+      )}
 
       <div className="mobile-topbar">
-        <button type="button" onClick={() => setSidebarOpen(true)} aria-label="Open sidebar"
-          style={{ background: '#2B2420', color: '#fff', border: 'none', borderRadius: '8px', padding: '8px 14px', fontSize: '13px', fontWeight: 600, cursor: 'pointer' }}>
+        <button
+          type="button"
+          onClick={() => setSidebarOpen(true)}
+          aria-label="Open sidebar"
+          style={{
+            background: '#2B2420', color: '#fff', border: 'none', borderRadius: '8px',
+            padding: '8px 14px', fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+          }}
+        >
           ☰ Menu
         </button>
         <span style={{ fontSize: '15px', fontWeight: 700, color: '#2B2420' }}>FarmTrack</span>
-        <button type="button" onClick={trackLocation} aria-label="Locate me"
-          style={{ background: '#5B7B5A', color: '#fff', border: 'none', borderRadius: '8px', padding: '8px 12px', fontSize: '13px', fontWeight: 600, cursor: 'pointer' }}>
+        <button
+          type="button"
+          onClick={trackLocation}
+          aria-label="Locate me"
+          style={{
+            background: '#5B7B5A', color: '#fff', border: 'none', borderRadius: '8px',
+            padding: '8px 12px', fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+          }}
+        >
           ⌖ GPS
         </button>
       </div>
+
+      {dbError && (
+        <div
+          role="alert"
+          style={{
+            position: 'fixed', top: 60, left: '50%', transform: 'translateX(-50%)', zIndex: 50,
+            background: '#FEF2F2', color: '#B91C1C', border: '1px solid #FCA5A5',
+            borderRadius: 8, padding: '8px 14px', fontSize: 13, maxWidth: '90%',
+          }}
+        >
+          {dbError}
+        </div>
+      )}
 
       <Sidebar
         onLocateClick={trackLocation}
@@ -194,11 +234,11 @@ function Workspace({ user }) {
         onFlyToField={handleFlyToField}
         saving={saving}
         dbLoading={dbLoading}
-        syncState={dbLoading ? 'connecting' : data.sync}
+        syncState={dbLoading ? 'connecting' : syncState}
         isMobileOpen={sidebarOpen}
         onMobileClose={() => setSidebarOpen(false)}
         userEmail={user.email}
-        onSignOut={() => signOut(auth)}
+        onSignOut={handleSignOut}
       />
 
       <div className="map-push-down" style={{ flex: 1, height: '100vh', display: 'flex' }}>
@@ -223,9 +263,29 @@ function Workspace({ user }) {
 export default function App() {
   const [user, setUser] = useState(undefined); // undefined = still checking
 
-  useEffect(() => onAuthStateChanged(auth, setUser), []);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const u = await me();
+        if (!cancelled) setUser(u);
+      } catch {
+        if (!cancelled) setUser(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
-  if (user === undefined) return <div className={styles.statusMessage}>Loading…</div>;
-  if (!user) return <Login />;
-  return <Workspace user={user} />;
+  if (user === undefined) {
+    return <div className={styles.statusMessage}>Loading…</div>;
+  }
+  if (!user) {
+    return <Login onAuthenticated={setUser} />;
+  }
+  return (
+    <Workspace
+      user={user}
+      onSignOut={() => setUser(null)}
+    />
+  );
 }
