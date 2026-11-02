@@ -1,16 +1,24 @@
-# React + Vite
+# FarmTrack (frontend)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + Vite farm parcel mapper. Talks to the **FarmTrack FastAPI** backend (JWT in HTTP-only cookies).
 
-Currently, two official plugins are available:
+## Setup
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+cp .env.example .env
+# Set VITE_GOOGLE_MAPS_API_KEY and VITE_API_URL (default http://localhost:8000)
 
-## React Compiler
+npm install
+npm run dev
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Backend must be running (see Farm_track_app_Backend `docker compose up --build`).
 
-## Expanding the ESLint configuration
+## Auth
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+- Register: email, phone, password (min 8 chars), optional full name
+- Session: HTTP-only cookies (`ft_access` / `ft_refresh`) via `credentials: 'include'`
+
+## Backend repo
+
+https://github.com/mburumanasseh/Farm_track_app_Backend

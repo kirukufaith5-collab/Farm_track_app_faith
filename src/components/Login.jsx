@@ -1,108 +1,126 @@
-
 import { useState } from 'react';
-import {
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  sendPasswordResetEmail,
-} from 'firebase/auth';
-import { auth } from '../firebase.js';
 import { tokens as t } from '../theme.js';
-
-const MESSAGES = {
-  'auth/invalid-credential': 'Incorrect email or password.',
-  'auth/user-not-found': 'Incorrect email or password.',
-  'auth/wrong-password': 'Incorrect email or password.',
-  'auth/invalid-email': 'Enter a valid email address.',
-  'auth/email-already-in-use': 'An account with this email already exists. Sign in instead.',
-  'auth/weak-password': 'Password must be at least 6 characters.',
-  'auth/too-many-requests': 'Too many attempts. Wait a moment and try again.',
-  'auth/network-request-failed': 'Network error. Check your connection and try again.',
-  'auth/operation-not-allowed': 'Email/password sign-in is not enabled in Firebase Authentication.',
-};
+import { login as apiLogin, register as apiRegister } from '../api/auth.js';
 
 const inputStyle = {
   width: '100%',
   boxSizing: 'border-box',
-  padding: '11px 12px',
-  borderRadius: '7px',
   border: `1px solid ${t.hairline}`,
-  background: t.bg,
+  borderRadius: '8px',
+  padding: '10px 12px',
   fontSize: '14px',
-  fontFamily: 'inherit',
   color: t.ink,
+  background: '#fff',
+  outline: 'none',
 };
 
-export default function Login() {
-  const [mode, setMode] = useState('signin');
+/**
+ * Auth screen — email/password login and registration against the FastAPI backend.
+ * Registration also collects phone (required by the API).
+ */
+export default function Login({ onAuthenticated }) {
+  const [mode, setMode] = useState('signin'); // signin | signup
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [fullName, setFullName] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState(null); // { type: 'error' | 'ok', text }
+  const [message, setMessage] = useState(null);
 
-  const fail = (err) =>
-    setMessage({ type: 'error', text: MESSAGES[err.code] || 'Something went wrong. Please try again.' });
+  const signup = mode === 'signup';
 
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
     setMessage(null);
     try {
-      if (mode === 'signup') {
-        await createUserWithEmailAndPassword(auth, email.trim(), password);
-      } else {
-        await signInWithEmailAndPassword(auth, email.trim(), password);
-      }
+      const user = signup
+        ? await apiRegister({
+            email: email.trim(),
+            phone: phone.trim(),
+            password,
+            full_name: fullName.trim() || null,
+          })
+        : await apiLogin({ email: email.trim(), password });
+      onAuthenticated?.(user);
     } catch (err) {
-      fail(err);
+      setMessage({ type: 'error', text: err.message || 'Something went wrong.' });
     } finally {
       setBusy(false);
     }
   };
 
-  const reset = async () => {
-    if (!email.trim()) {
-      setMessage({ type: 'error', text: 'Enter your email above, then choose "Forgot password".' });
-      return;
-    }
-    try {
-      await sendPasswordResetEmail(auth, email.trim());
-      setMessage({ type: 'ok', text: 'Password reset email sent. Check your inbox.' });
-    } catch (err) {
-      fail(err);
-    }
-  };
-
-  const signup = mode === 'signup';
-
   return (
     <div style={{
       minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
-      background: `linear-gradient(180deg, #F3EEE3 0%, ${t.bg} 100%)`, padding: '24px',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
+      background: t.bg, padding: '24px',
     }}>
       <form onSubmit={submit} style={{
-        width: '100%', maxWidth: '380px', background: t.bgCard, border: `1px solid ${t.hairline}`,
-        borderRadius: '14px', padding: '28px', display: 'flex', flexDirection: 'column', gap: '14px',
-        boxShadow: '0 12px 40px rgba(43,36,32,0.08)',
+        width: '100%', maxWidth: '380px', background: t.bgCard, borderRadius: '12px',
+        border: `1px solid ${t.hairline}`, padding: '28px 24px',
+        boxShadow: '0 8px 30px rgba(43,36,32,0.06)',
+        display: 'flex', flexDirection: 'column', gap: '14px',
       }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: '24px', color: t.ink, letterSpacing: '-0.3px' }}>FarmTrack</h1>
+          <h1 style={{ margin: 0, fontSize: '22px', fontWeight: 700, color: t.ink, letterSpacing: '-0.3px' }}>
+            FarmTrack
+          </h1>
           <p style={{ margin: '4px 0 0', fontSize: '13px', color: t.inkSoft }}>
             {signup ? 'Create your account to start mapping parcels.' : 'Sign in to your land records.'}
           </p>
         </div>
 
+        {signup && (
+          <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11.5px', fontWeight: 600, color: t.inkSoft }}>
+            Full name <span style={{ fontWeight: 400 }}>(optional)</span>
+            <input
+              type="text"
+              autoComplete="name"
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              style={inputStyle}
+            />
+          </label>
+        )}
+
         <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11.5px', fontWeight: 600, color: t.inkSoft }}>
           Email
-          <input type="email" required autoComplete="email" value={email}
-            onChange={(e) => setEmail(e.target.value)} style={inputStyle} />
+          <input
+            type="email"
+            required
+            autoComplete="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            style={inputStyle}
+          />
         </label>
+
+        {signup && (
+          <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11.5px', fontWeight: 600, color: t.inkSoft }}>
+            Phone
+            <input
+              type="tel"
+              required
+              autoComplete="tel"
+              placeholder="+2547…"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              style={inputStyle}
+            />
+          </label>
+        )}
 
         <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11.5px', fontWeight: 600, color: t.inkSoft }}>
           Password
-          <input type="password" required minLength={6}
-            autoComplete={signup ? 'new-password' : 'current-password'} value={password}
-            onChange={(e) => setPassword(e.target.value)} style={inputStyle} />
+          <input
+            type="password"
+            required
+            minLength={8}
+            autoComplete={signup ? 'new-password' : 'current-password'}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            style={inputStyle}
+          />
         </label>
 
         {message && (
@@ -116,24 +134,25 @@ export default function Login() {
           </div>
         )}
 
-        <button type="submit" disabled={busy} style={{
-          background: t.ink, color: '#fff', border: 'none', borderRadius: '8px', padding: '12px',
-          fontSize: '14px', fontWeight: 600, cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.7 : 1,
-        }}>
+        <button
+          type="submit"
+          disabled={busy}
+          style={{
+            background: t.ink, color: '#fff', border: 'none', borderRadius: '8px', padding: '12px',
+            fontSize: '14px', fontWeight: 600, cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.7 : 1,
+          }}
+        >
           {busy ? 'Please wait…' : signup ? 'Create account' : 'Sign in'}
         </button>
 
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12.5px' }}>
-          <button type="button" onClick={() => { setMode(signup ? 'signin' : 'signup'); setMessage(null); }}
-            style={{ background: 'none', border: 'none', color: t.sage, fontWeight: 600, cursor: 'pointer', padding: 0 }}>
+          <button
+            type="button"
+            onClick={() => { setMode(signup ? 'signin' : 'signup'); setMessage(null); }}
+            style={{ background: 'none', border: 'none', color: t.sage, fontWeight: 600, cursor: 'pointer', padding: 0 }}
+          >
             {signup ? 'Have an account? Sign in' : 'New here? Create account'}
           </button>
-          {!signup && (
-            <button type="button" onClick={reset}
-              style={{ background: 'none', border: 'none', color: t.inkSoft, cursor: 'pointer', padding: 0 }}>
-              Forgot password
-            </button>
-          )}
         </div>
       </form>
     </div>
